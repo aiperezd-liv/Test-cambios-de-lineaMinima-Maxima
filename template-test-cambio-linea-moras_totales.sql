@@ -1,5 +1,6 @@
 /***********************************************************************************************************************
   PLANTILLA BASE AJUSTADA: COMPARATIVA DE TASAS DE MORA (ESCENARIO ACTUAL VS. ESCENARIO HIPOTÉTICO)
+  ADAPTADO PARA LA NUEVA VARIABLE DE RIESGO DE TEXTO (SC_RISK_LEVEL)
 ***********************************************************************************************************************/
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -7,17 +8,18 @@
 ------------------------------------------------------------------------------------------------------------------------
 WITH LINEAS AS (
   SELECT
-      BR_ING_TOT,              -- Ingreso total del cliente
-      CTA_CVE,                 -- Clave única de la cuenta
-      BR_IMP_LIM_CRED,         -- Límite de crédito asignado real (Observado en solicitud)
-      BR_MODULO_SCORE_DES,     -- Descripción del módulo de score
-      BR_HIT_DES,              -- Estatus de consulta en Buró (HIT / NOHIT / THIN FILE)
-      SEGMENTO_SCORE,          -- Segmentación por score crediticio
-      BR_NIVEL_RIESGO          -- Nivel de riesgo asignado
-  FROM `crp-pro-dwh-semanticagold.EIL_DP_VMASTER.VFAC_NEGFIN_SOLICITUDES`
-  WHERE DT_FCH_SOL BETWEEN '2025-03-01' AND '2025-08-31'  -- <<< RANGO TEMPORAL PARA CUENTAS CON MAS DE 6 MESES DE ANTIGUEDAD
-    AND BR_ORG = 210                                       -- <<< FILTRO DE PRODUCTO 
-    AND CTA_CVE > 0                                        -- FILTRO CUENTAS ACTIVAS 
+      a.BR_ING_TOT,              -- Ingreso total del cliente
+      a.CTA_CVE,                 -- Clave única de la cuenta
+      a.BR_IMP_LIM_CRED,         -- Límite de crédito asignado real (Observado en solicitud)
+      a.BR_MODULO_SCORE_DES,     -- Descripción del módulo de score
+      a.BR_HIT_DES,              -- Estatus de consulta en Buró (HIT / NOHIT / THIN FILE)
+      a.SEGMENTO_SCORE,          -- Segmentación por score crediticio
+      -- Se cambia la variable por sc_risk_level manteniendo el alias para no romper los módulos siguientes
+      UPPER(a.SC_RISK_LEVEL) AS BR_NIVEL_RIESGO  
+  FROM `crp-pro-dwh-semanticagold.EIL_DP_VMASTER.VFAC_NEGFIN_SOLICITUDES` a
+  WHERE a.DT_FCH_SOL BETWEEN '2025-03-01' AND '2025-08-31'  -- <<< RANGO TEMPORAL PARA CUENTAS CON MAS DE 6 MESES DE ANTIGUEDAD
+    AND a.BR_ORG = 210                                       -- <<< FILTRO DE PRODUCTO 
+    AND a.CTA_CVE > 0                                        -- FILTRO CUENTAS ACTIVAS 
 ),
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -110,7 +112,7 @@ CALC_SDO_PROM AS (
   SELECT 
     a.BR_HIT_DES,
     a.SEGMENTO_SCORE,
-    a.BR_NIVEL_RIESGO,
+    a.BR_NIVEL_RIESGO, -- Agrupa por el texto estandarizado de sc_risk_level
     a.NEW_LC,
 
     -- Tasas de morosidad grupales
@@ -158,7 +160,7 @@ CONSOLIDADO AS (
   LEFT JOIN CALC_SDO_PROM p
     ON p.BR_HIT_DES = a.BR_HIT_DES
    AND p.SEGMENTO_SCORE = a.SEGMENTO_SCORE
-   AND p.BR_NIVEL_RIESGO = a.BR_NIVEL_RIESGO
+   AND p.BR_NIVEL_RIESGO = a.BR_NIVEL_RIESGO -- Cruza correctamente por el texto de riesgo
    AND p.NEW_LC = a.NEW_LC
 ),
 
@@ -218,7 +220,7 @@ NUEVAS_MORAS AS (
 CAMBIOS_MORAS_PERFORMANCE AS (
   SELECT 
     BR_HIT_DES,
-    BR_NIVEL_RIESGO,
+    BR_NIVEL_RIESGO, -- Agrupación por texto de riesgo
     COUNT(*) AS Solicitudes,
     SUM(CASE WHEN CTA_CVE > 0 THEN 1 ELSE 0 END) AS Cuentas,
 
@@ -247,7 +249,7 @@ CAMBIOS_MORAS_PERFORMANCE AS (
 ------------------------------------------------------------------------------------------------------------------------
 SELECT 
   BR_HIT_DES,
-  BR_NIVEL_RIESGO,
+  BR_NIVEL_RIESGO, -- Saldrá con las etiquetas de texto de la nueva variable
   Solicitudes,
   Cuentas,
 

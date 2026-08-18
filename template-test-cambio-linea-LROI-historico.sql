@@ -1,0 +1,144 @@
+-- ============================================================
+-- PROPÓSITO: CÁLCULO HISTÓRICO DEL INDICADOR LROI (RENTABILIDAD / COLOCACIÓN)
+--            POR COHORTE MENSUAL (PERIODO_ALTA), BR_HIT_DES Y NIVEL DE RIESGO
+-- VENTANAS: 6M, 9M Y 12M (MOB 6, MOB 9, MOB 12)
+-- FILTRO DE MUESTRA: CUENTAS ORIGINADAS DESDE DICIEMBRE 2024 CON LÍMITE < $4,000
+-- ============================================================
+
+-- STREAMING_CHUNK: Módulo 1 - Filtrando universo de solicitudes desde Diciembre 2024...
+WITH BASE_CUENTAS AS (
+  SELECT DISTINCT
+    CTA_CVE,
+    BR_HIT_DES,
+    UPPER(TRIM(COALESCE(CAST(SC_RISK_LEVEL AS STRING), '0. NO IDENTIFICADO'))) AS SC_RISK_LEVEL,
+    BR_ING_TOT
+  FROM `crp-pro-dwh-semanticagold.EIL_DP_VMASTER.VFAC_NEGFIN_SOLICITUDES`
+  WHERE DT_FCH_SOL >= '2024-12-01'  -- Rango temporal extendido a Diciembre 2024
+    AND BR_ORG = 210                -- Producto evaluado
+    AND CTA_CVE > 0                 -- Cuentas válidas
+),
+
+-- STREAMING_CHUNK: Módulo 2 - Obteniendo histórico mensual de saldos y calculando MOB...
+SDO_CTA_MES AS (
+  SELECT
+    a.CTA_CVE,
+    a.CTA_IMP_LIM_CRD,
+    (a.CTA_IMP_MCMP_LTD - a.CTA_IMP_DEV_LTD) AS IMP_MONTO_COLOCADO,
+    b.CTA_FCH_ALTA,
+    c.BR_HIT_DES,
+    c.SC_RISK_LEVEL,
+    -- Cálculo manual del MOB (Months On Books)
+    DATE_DIFF(DATE(a.ANIO, a.MES, 1), DATE_TRUNC(b.CTA_FCH_ALTA, MONTH), MONTH) AS MOB
+  FROM `crp-pro-dwh-semanticagold.EIL_DP_VDWH.VFAC_SDO_CTA_MES` a
+  INNER JOIN `crp-pro-dwh-semanticagold.EIL_DP_VDWH.VDIM_CTA` b
+    ON a.CTA_CVE = b.CTA_CVE
+  INNER JOIN BASE_CUENTAS c
+    ON a.CTA_CVE = c.CTA_CVE
+  WHERE a.TIP_INF = 210
+    AND a.CTA_EDO_CVE NOT IN ('T', 'P', 'Z', '8', '9')
+    AND a.ANIO >= 2024
+),
+
+-- STREAMING_CHUNK: Módulo 3 - Pivoteando monto colocado por ventanas (6M, 9M y 12M)...
+COLOCACION_PIVOT_PRE AS (
+  SELECT
+    CTA_CVE,
+    CTA_FCH_ALTA,
+    BR_HIT_DES,
+    SC_RISK_LEVEL,
+    -- Determinación del Límite Inicial / Máximo Histórico
+    COALESCE(
+      MAX(CASE WHEN MOB <= 1 THEN CTA_IMP_LIM_CRD END),
+      MAX(CTA_IMP_LIM_CRD)
+    ) AS CTA_IMP_LIM_CRD,
+    MAX(CASE WHEN MOB = 6 THEN IMP_MONTO_COLOCADO END) AS IMP_COLOCADO_6M,
+    MAX(CASE WHEN MOB = 9 THEN IMP_MONTO_COLOCADO END) AS IMP_COLOCADO_9M,
+    MAX(CASE WHEN MOB = 12 THEN IMP_MONTO_COLOCADO END) AS IMP_COLOCADO_12M
+  FROM SDO_CTA_MES
+  GROUP BY 1, 2, 3, 4
+),
+
+-- STREAMING_CHUNK: Módulo 3.5 - Filtrando muestra ajustada a límites menores a 4,000...
+COLOCACION_PIVOT AS (
+  SELECT *
+  FROM COLOCACION_PIVOT_PRE
+  WHERE CTA_IMP_LIM_CRD < 4000
+),
+
+-- STREAMING_CHUNK: Módulo 4 - Extrayendo histórico de rentabilidad financiera acumulada...
+RENTABILIDAD_MES AS (
+  SELECT
+    rent.CTA_CVE,
+    rent.ACUM_UT_FINANCIERA,
+    -- Cálculo manual del MOB para la tabla de rentabilidad acumulada
+    DATE_DIFF(DATE(rent.ANIO_ID, rent.MES_ID, 1), DATE_TRUNC(cta.CTA_FCH_ALTA, MONTH), MONTH) AS MOB
+  FROM `crp-pro-dwh-semanticagold.MUS_PRO_DWH_SAS_TEMP.VMC3_FAC_RENT_MES_ACUM` rent
+  INNER JOIN `crp-pro-dwh-semanticagold.EIL_DP_VDWH.VDIM_CTA` cta
+    ON rent.CTA_CVE = cta.CTA_CVE
+  INNER JOIN BASE_CUENTAS base
+    ON rent.CTA_CVE = base.CTA_CVE
+  WHERE rent.ANIO_ID >= 2024
+),
+
+-- STREAMING_CHUNK: Módulo 5 - Pivoteando utilidad financiera por ventanas (6M, 9M y 12M)...
+RENTABILIDAD_PIVOT AS (
+  SELECT
+    CTA_CVE,
+    MAX(CASE WHEN MOB = 6 THEN ACUM_UT_FINANCIERA END) AS ACUM_UT_FINANCIERA_6M,
+    MAX(CASE WHEN MOB = 9 THEN ACUM_UT_FINANCIERA END) AS ACUM_UT_FINANCIERA_9M,
+    MAX(CASE WHEN MOB = 12 THEN ACUM_UT_FINANCIERA END) AS ACUM_UT_FINANCIERA_12M
+  FROM RENTABILIDAD_MES
+  WHERE MOB IN (6, 9, 12)
+  GROUP BY CTA_CVE
+),
+
+-- STREAMING_CHUNK: Módulo 6 - Consolidando cohorte mensual y métricas a nivel cuenta...
+CONSOLIDADO AS (
+  SELECT
+    FORMAT_DATE('%Y-%m', col.CTA_FCH_ALTA) AS PERIODO_ALTA,
+    col.CTA_CVE,
+    col.BR_HIT_DES,
+    col.SC_RISK_LEVEL,
+    col.CTA_IMP_LIM_CRD,
+    col.IMP_COLOCADO_6M,
+    col.IMP_COLOCADO_9M,
+    col.IMP_COLOCADO_12M,
+    rent.ACUM_UT_FINANCIERA_6M,
+    rent.ACUM_UT_FINANCIERA_9M,
+    rent.ACUM_UT_FINANCIERA_12M
+  FROM COLOCACION_PIVOT col
+  LEFT JOIN RENTABILIDAD_PIVOT rent
+    ON col.CTA_CVE = rent.CTA_CVE
+)
+
+-- STREAMING_CHUNK: Generando reporte final agrupado por cohorte mensual, hit y riesgo...
+-- ============================================================
+-- OUTPUT FINAL: LROI HISTÓRICO COHORTE A COHORTE (6M, 9M Y 12M)
+-- ============================================================
+SELECT
+  PERIODO_ALTA,
+  BR_HIT_DES,
+  SC_RISK_LEVEL,
+  COUNT(DISTINCT CTA_CVE) AS TOTAL_CUENTAS,
+  ROUND(AVG(CTA_IMP_LIM_CRD), 2) AS LINEA_PROMEDIO,
+
+  -- VENTANA 6 MESES (MOB = 6)
+  SUM(IMP_COLOCADO_6M) AS TOTAL_COLOCADO_6M,
+  SUM(ACUM_UT_FINANCIERA_6M) AS TOTAL_UT_FINANCIERA_6M,
+  SAFE_DIVIDE(SUM(ACUM_UT_FINANCIERA_6M), SUM(IMP_COLOCADO_6M)) AS PORC_LROI_6M,
+
+  -- VENTANA 9 MESES (MOB = 9)
+  SUM(IMP_COLOCADO_9M) AS TOTAL_COLOCADO_9M,
+  SUM(ACUM_UT_FINANCIERA_9M) AS TOTAL_UT_FINANCIERA_9M,
+  SAFE_DIVIDE(SUM(ACUM_UT_FINANCIERA_9M), SUM(IMP_COLOCADO_9M)) AS PORC_LROI_9M,
+
+  -- VENTANA 12 MESES (MOB = 12)
+  SUM(IMP_COLOCADO_12M) AS TOTAL_COLOCADO_12M,
+  SUM(ACUM_UT_FINANCIERA_12M) AS TOTAL_UT_FINANCIERA_12M,
+  SAFE_DIVIDE(SUM(ACUM_UT_FINANCIERA_12M), SUM(IMP_COLOCADO_12M)) AS PORC_LROI_12M
+
+FROM CONSOLIDADO
+WHERE BR_HIT_DES IN ('HIT', 'THIN FILE', 'NOHIT') 
+  AND SC_RISK_LEVEL != '0. NO IDENTIFICADO'
+GROUP BY 1, 2, 3
+ORDER BY PERIODO_ALTA ASC, BR_HIT_DES ASC, SC_RISK_LEVEL ASC;

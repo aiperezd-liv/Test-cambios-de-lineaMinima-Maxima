@@ -16,7 +16,7 @@ WITH LINEAS AS (
       a.SEGMENTO_SCORE,          -- Segmentación por score crediticio
       UPPER(a.SC_RISK_LEVEL) AS BR_NIVEL_RIESGO  
   FROM `crp-pro-dwh-semanticagold.EIL_DP_VMASTER.VFAC_NEGFIN_SOLICITUDES` a
-  WHERE a.DT_FCH_SOL BETWEEN '2025-03-01' AND '2025-08-31'  -- <<< RANGO TEMPORAL PARA CUENTAS CON MAS DE 6 MESES DE ANTIGUEDAD
+  WHERE a.DT_FCH_SOL BETWEEN '2024-11-01' AND '2025-10-31'  -- <<< RANGO TEMPORAL PARA CUENTAS CON MAS DE 6 MESES DE ANTIGUEDAD
     AND a.BR_ORG = 210                                       -- <<< FILTRO DE PRODUCTO 
     AND a.CTA_CVE > 0                                        -- FILTRO CUENTAS ACTIVAS 
 ),
@@ -99,8 +99,8 @@ LINEAS_CON_NEW_LC AS (
       4000 AS NEW_LC -- Dado que filtramos por LC < 4000, la nueva línea para todos será forzadamente 4000
   FROM LINEAS a
   JOIN MORAS b ON a.CTA_CVE = b.CTA_CVE
-  WHERE a.BR_ING_TOT >= 4000      -- <<< REGLA DE NEGOCIO: Ingresos mayores o iguales a 4k
-    AND b.CTA_IMP_LIM_CRD < 4000  -- <<< REGLA DE NEGOCIO: Línea de crédito base menor a 4k
+  WHERE b.CTA_IMP_LIM_CRD < 4000  -- <<< REGLA DE NEGOCIO: Línea de crédito base menor a 4k
+
 ),
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -238,7 +238,7 @@ CAMBIOS_MORAS_PERFORMANCE AS (
     SUM(SDO_TOT_9M_NEW)   AS TOTAL_SDO_TOT_9M_NEW,
     SUM(SDO_90_9M_NEW)    AS TOTAL_SDO_90_9M_NEW
   FROM NUEVAS_MORAS
-  WHERE BR_HIT_DES IN ('HIT', 'THIN FILE', 'NOHIT')  
+  WHERE BR_HIT_DES IN ('HIT', 'NOHIT')  
   GROUP BY 1, 2
 )
 
